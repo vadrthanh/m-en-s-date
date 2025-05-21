@@ -43,37 +43,34 @@ from scipy.spatial.distance import pdist, squareform
 from imblearn.over_sampling import SMOTE, ADASYN
 
 # Deep learning imports
-try:
-    import tensorflow as tf
-    from tensorflow import keras
-    from keras import layers
-    from keras.models import Sequential, Model, load_model
-    from keras.layers import (
+
+import tensorflow as tf
+from tensorflow import keras
+from keras import layers
+from keras.models import Sequential, Model, load_model
+from keras.layers import (
         Input, Dense, Reshape, Flatten, Activation, LeakyReLU, Dropout,
         ZeroPadding2D, BatchNormalization, Conv2D, AveragePooling2D, 
         MaxPooling2D, GlobalMaxPooling2D, LSTM, Conv1D, MaxPooling1D, 
         Embedding, Bidirectional
     )
-    from keras.initializers import glorot_uniform
-    import keras.backend as K
-    from keras.datasets import mnist
-except ImportError:
-    print("Warning: TensorFlow/Keras not installed. Deep learning functionality will not be available.")
+from keras.initializers import glorot_uniform
+import keras.backend as K
+from keras.datasets import mnist
 
 # Optimization imports
-try:
-    from mealpy.swarm_based.PSO import BasePSO
-    from mealpy.evolutionary_based.GA import BaseGA
-    from mealpy.evolutionary_based.DE import BaseDE
-    from mealpy.swarm_based.MFO import BaseMFO
-except ImportError:
-    print("Warning: mealpy not installed. Optimization functionality will not be available.")
+
+from mealpy.swarm_based.PSO import OriginalPSO  # Changed from PSO
+from mealpy.evolutionary_based.GA import BaseGA  # Changed from GA
+from mealpy.evolutionary_based.DE import OriginalDE  # Changed from DE
+from mealpy.swarm_based.MFO import OriginalMFO  # Changed from MFO
+from mealpy.utils.space import IntegerVar, FloatVar  # Add this line
+
 
 # CTGAN for synthetic data generation
-try:
-    from sdv.tabular import CTGAN
-except ImportError:
-    print("Warning: sdv not installed. CTGAN functionality will not be available.")
+from sdv.single_table import CTGANSynthesizer as CTGAN
+from sdv.metadata import SingleTableMetadata
+
 
 
 def create_output_directory():
@@ -676,10 +673,19 @@ def optimize_ensemble(X_train, y_train, X_test, y_test, optimization_method='PSO
         return accuracy
     
     # Define the problem
+    # For Mealpy 3.x+, 'bounds' should be a list of Var objects.
+    bounds_new = [
+        IntegerVar(lb=2, ub=300, name="rf_n_estimators"),          # n_estimators for RandomForestClassifier
+        IntegerVar(lb=2, ub=200, name="rf_max_depth"),             # max_depth for RandomForestClassifier
+        IntegerVar(lb=2, ub=300, name="ada_n_estimators"),         # n_estimators for AdaBoostClassifier
+        FloatVar(lb=0.01, ub=1.0, name="ada_learning_rate"),       # learning_rate for AdaBoostClassifier
+        IntegerVar(lb=2, ub=300, name="et_n_estimators"),          # n_estimators for ExtraTreesClassifier
+        IntegerVar(lb=2, ub=200, name="et_max_depth")              # max_depth for ExtraTreesClassifier
+    ]
+
     problem = {
         "obj_func": fitness_function,
-        "lb": [2, 2, 2, 0.01, 2, 2],
-        "ub": [300, 200, 300, 1, 300, 200],
+        "bounds": bounds_new,
         "minmax": "max",
         "log_to": None,
         "save_population": False,
@@ -687,19 +693,28 @@ def optimize_ensemble(X_train, y_train, X_test, y_test, optimization_method='PSO
     
     # Select optimization algorithm
     if optimization_method == 'PSO':
-        model = BasePSO(problem, epoch=10, pop_size=5, pr=0.03)
+        model = OriginalPSO(epoch=10, pop_size=5) # Removed 'problem' argument
     elif optimization_method == 'GA':
-        model = BaseGA(problem, epoch=10, pop_size=5, pr=0.03)
+        model = BaseGA(epoch=10, pop_size=5, pc=0.9, pm=0.05) # Removed 'problem' argument
     elif optimization_method == 'MFO':
-        model = BaseMFO(problem, epoch=10, pop_size=5, pr=0.03)
+        model = OriginalMFO(epoch=10, pop_size=5) # Removed 'problem' argument
     elif optimization_method == 'DE':
-        model = BaseDE(problem, epoch=10, pop_size=5, pr=0.03)
+        model = OriginalDE(epoch=10, pop_size=5, wf=0.8, cr=0.9) # Removed 'problem' argument
     else:
-        model = BasePSO(problem, epoch=10, pop_size=5, pr=0.03)  # Default to PSO
+        model = OriginalPSO(epoch=2, pop_size=5)  # Default to OriginalPSO, removed 'problem' argument
     
     # Solve the optimization problem
-    best_position, best_fitness = model.solve(problem)
+    # For newer versions of Mealpy, model.solve() returns the best agent object
+    start_time = time.time()
+    best_agent = model.solve(problem)
+    end_time = time.time()
+    optimization_duration = end_time - start_time
+    print(f"Optimization completed in {optimization_duration:.2f} seconds.")
+    best_position = best_agent.solution
+    best_fitness = best_agent.target # For single-objective problems
+
     print(f"Best solution: {best_position}, Best fitness: {best_fitness}")
+
     
     return best_position, best_fitness
 
@@ -760,8 +775,12 @@ def use_ctgan_oversampling(Data25, num_samples=67824):
     dataNCTGAN.columns = dataNCTGAN.columns.astype(str)
     dataACTGAN.columns = dataACTGAN.columns.astype(str)
     
+    # Create metadata
+    metadata = SingleTableMetadata()
+    metadata.detect_from_dataframe(data=dataNCTGAN)
+    
     # Create and train CTGAN model
-    model = CTGAN(epochs=100, verbose=True, batch_size=32)
+    model = CTGAN(metadata, epochs=100, verbose=True, batch_size=32)
     model.fit(dataNCTGAN)
     
     # Generate synthetic data
@@ -900,13 +919,14 @@ def main():
     # Optimized ensemble
     try:
         print("\n=== Optimizing Ensemble Model ===")
+        print("\n----Optimizing with PSO:----")
         best_params_pso, best_acc_pso = optimize_ensemble(
             X_train, y_train, X_test, y_test, optimization_method='PSO'
         )
-        
-        best_params_ga, best_acc_ga = optimize_ensemble(
-            X_train, y_train, X_test, y_test, optimization_method='GA'
-        )
+        # print("\n----Optimizing with GA:----")
+        # best_params_ga, best_acc_ga = optimize_ensemble(
+        #     X_train, y_train, X_test, y_test, optimization_method='GA'
+        # )
     except Exception as e:
         print(f"Error optimizing ensemble: {e}")
     
@@ -939,18 +959,18 @@ def main():
     print("Random Forest with ADASYN:")
     rf_acc_adasyn = train_evaluate_model(rf, X_train_a, y_train_a, X_test_a, y_test_a, "RF ADASYN")
     
-    # Try CTGAN if available
-    try:
-        print("\nCTGAN Synthetic Data:")
-        ctgan_data = use_ctgan_oversampling(combined_data)
-        ctgan_target = ctgan_data['target']
-        ctgan_feature = ctgan_data.drop('target', axis=1)
-        X_train_c, X_test_c, y_train_c, y_test_c = train_test_split_data(ctgan_feature, ctgan_target)
+    #Try CTGAN if available
+    # try:
+    #     print("\nCTGAN Synthetic Data:")
+    #     ctgan_data = use_ctgan_oversampling(combined_data)
+    #     ctgan_target = ctgan_data['target']
+    #     ctgan_feature = ctgan_data.drop('target', axis=1)
+    #     X_train_c, X_test_c, y_train_c, y_test_c = train_test_split_data(ctgan_feature, ctgan_target)
         
-        print("Random Forest with CTGAN:")
-        rf_acc_ctgan = train_evaluate_model(rf, X_train_c, y_train_c, X_test_c, y_test_c, "RF CTGAN")
-    except Exception as e:
-        print(f"Error using CTGAN: {e}")
+    #     print("Random Forest with CTGAN:")
+    #     rf_acc_ctgan = train_evaluate_model(rf, X_train_c, y_train_c, X_test_c, y_test_c, "RF CTGAN")
+    # except Exception as e:
+    #     print(f"Error using CTGAN: {e}")
     
     # Print summary of results
     print("\n=== Results Summary ===")
@@ -966,9 +986,14 @@ def main():
     print(f"ADASYN - RF: {rf_acc_adasyn:.4f}")
     
     try:
-        print(f"CTGAN - RF: {rf_acc_ctgan:.4f}")
+        print(f"PSO - RF: {best_acc_pso:.4f}")
+        # print(f"GA - RF: {best_acc_ga:.4f}")
     except:
         pass
+    # try:
+    #     print(f"CTGAN - RF: {rf_acc_ctgan:.4f}")
+    # except:
+    #     pass
 
 
 if __name__ == "__main__":
